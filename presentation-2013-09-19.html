@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+
+  <head>
+    <meta charset="utf-8">
+
+    <title>Staged Parser combinators</title>
+
+    <meta name="description" content="ERC meeting presentation, 19 September 2013">
+    <meta name="author" content="Manohar Jonnalagedda">
+
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <link rel="stylesheet" href="css/reveal.min.css">
+    <link rel="stylesheet" href="css/theme/luc.css" id="theme">
+    <!-- link rel="stylesheet" href="css/print/pdf.css" id="theme" -->
+
+
+    <!-- For syntax highlighting -->
+    <link rel="stylesheet" href="lib/css/zenburn.css">
+
+    <!--[if lt IE 9]>
+    <script src="lib/js/html5shiv.js"></script>
+    <![endif]-->
+  </head>
+
+  <body>
+
+    <div class="reveal">
+
+      <!-- Any section element inside of this container is displayed as a slide -->
+      <div class="slides">
+
+        <section data-markdown>
+          <script type="text/template">
+            ###Staged Parser Combinators
+            #### End of internship presentation, dry run
+
+            <small> Manohar Jonnalagedda, September 19, 2013 </small>
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+            ###Parser Combinators - the good
+
+              * Embedded DSL for parsing
+              * high-level description of a parser
+              * maintainable
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+            ###Parser Combinators - the bad
+
+              * slow - overhead of object creation
+              * slow - overhead of dispatch
+              * => high performance parsers are written
+                by hand
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+            ###Staged Parser Combinators
+
+              * staging for removing abstraction
+              * parser combinators become parser generators
+              * deep embedding approach allows to generate what
+              we need
+          </script>
+        </section>
+
+        <section>
+          <h3>A HTTP Message</h3>
+          <pre><code data-trim class="javascript">
+HTTP/1.1 200 OK
+Date: Mon, 23 May 2005 22:38:34 GMT
+Server: Apache/1.3.3.7 (Unix) (Red-Hat/Linux)
+Last-Modified: Wed, 08 Jan 2003 23:11:55 GMT
+Etag: "3f80f-1b6-3e1cb03b"
+Content-Type: text/html; charset=UTF-8
+Content-Length: 129
+Connection: close
+
+&lt;html&gt;
+&lt;head&gt;
+  &lt;title&gt;An Example Page&lt;/title&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  Hello World, this is a very simple HTML document.
+&lt;/body&gt;
+&lt;/html&gt;
+&nbsp;
+          </code></pre>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+            ###Main characteristics
+
+             * Status message
+             * Headers (we are interested in some of them)
+             * Message (chunked or not)
+             * Some (amusing/annoying) character-level issues
+          </script>
+        </section>
+
+        <section>
+          <h3>A Http parser</h3>
+          <pre><code data-trim class="scala">
+def response: Parser[Response] = status~headers<~crlf ^^ {
+  case st~hds => Response(
+    status = st,
+    contentLength = hds("content-length").asInstanceOf[Int],
+    connection = hds.getOrElse("connection", "").asInstanceOf[String],
+    chunked = hds.getOrElse("chunked", false).asInstanceOf[Boolean],
+    upgrade = hds.getOrElse("upgrade", false).asInstanceOf[Boolean]
+  )
+}
+
+def respAndMessage: Parser[(Response,String)] = response >> {
+  case rsp =>
+    {
+      if(rsp.chunked) chunkedParser
+      else if(rsp.contentLength == 0) ""<~crlf
+      else body(rsp.contentLength)
+    } ^^ {(rsp, _)}
+}
+          </code></pre>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Implementation for Parser Combinators
+
+          * Parsers are functions from `Int` to `ParseResult`[T]
+            ```scala
+            class Parser[T] extends (Int => ParseResult[T])
+            ```
+
+          * Combinators create new instances of a parser
+            ```scala
+            def map[U](f: T => U) = new Parser[U]{
+              def apply(i:Int) => self(i) map f
+            }
+            ```
+
+          * Overhead in creation of new Parser instances
+          * Overhead in dispatch on method `apply`
+
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Integrating Staging
+
+          * Use staging for creating a representation of a parser
+          * At code generation time, functions are inlined
+          * No unnecessary object allocation
+            * A Parser is not a staged type
+
+          * Parsers are functions from `Int` to `ParseResult`[T]
+            ```scala
+            class Parser[T] extends (Int => ParseResult[T])
+            ```
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Staging Parsers, phase 1
+
+          * Convert functions into unstaged functions to and from staged types
+            ```scala
+            class Parser[T] extends (Rep[Int] => Rep[ParseResult[T]])
+            ```
+
+          * Similarly for combinators
+            ```scala
+            def map[U](f: Rep[T] => Rep[U])
+            ...
+            ```
+
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Early materialization of result
+
+          * ```scala
+            class Parser[T] extends (Rep[Int] => Rep[ParseResult[T])
+            ```
+
+          * We want the result to be materialized as late as possible => at the end.
+
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Generators (generalizing `foreach`)
+
+          * Intuition: a parser ___folds___ input into a result
+            * takes a decision for each element of the input
+
+          * Let us generalize, and stage, foreach
+            ```
+            class Foreach[T] extends (T => Unit) => Unit
+            ```
+          * We can define combinators on foreach
+            ```
+            def map[U](g: T => U) = new Generator[U]{
+              def apply(f: T => Unit) =
+                self.apply{
+                  x => f(g(x))
+                }
+            }
+            ```
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Generators (generalizing `foreach`)
+
+          * Staging foreach: unstaged functions to and from staged types again.
+
+            ```scala
+            class Generator[T] extends ((Rep[T] => Rep[Unit]) => Rep[Unit])
+            ```
+          * Generators are not staged. Computation delayed until they are applied
+
+          * Example
+            ```scala
+            var s = 0
+            rangeGen(1,10).apply{ x =>
+              s = s+x
+            }
+            println(s)
+            ```
+
+          * Generates the following
+            ```scala
+            var s = 0
+            var i = 1
+            while (i < 10){
+              s = s + i
+            }
+            println(s)
+            ```
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Back to staged parsers
+
+          * Parsers are functions from `Int` to `ParseResult`
+            ```scala
+            class Parser[T]
+              extends (Rep[Int] => Rep[ParseResult[T]])
+            ```
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Back to staged parsers
+
+          * Parsers are functions from `Int` to `Generator`
+            ```scala
+            class Parser[T]
+              extends (Rep[Int] => Generator[ParseResult[T]])
+            ```
+          * Executing a parser
+            ```scala
+            var s = Failure[T]
+            val myParser = ...
+            myParser(0).apply{
+              x => s = x
+            }
+            println(s)
+            ```
+          </script>
+        </section>
+
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Combinators geared to staging
+          * `rep` combinator produces lists
+          * `repFold` is better than `rep`
+            * we can fold over different types
+            * more efficient for digit parsing
+            * more efficient for string parsing
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Structs replace algebraic data types
+          * Use struct abstraction where needed
+          * Structs constructed as late as possible
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### The `or` combinator
+          * `a ~ ((b ~ b2)| c) ~ d`
+          * generate functions for `or`
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Benchmarks
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Future work
+          * Parse a larger stack
+          * More combinators/optimization
+          * Nicer interface
+          </script>
+        </section>
+
+        <section data-markdown>
+          <script type="text/template">
+          ### Thank you!
+          </script>
+        </section>
+
+      </div>
+
+    </div>
+
+    <script src="lib/js/head.min.js"></script>
+    <script src="js/reveal.min.js"></script>
+
+    <script>
+
+    Reveal.initialize({
+
+        // Display controls in the bottom right corner
+        controls: false,
+
+        // Display a presentation progress bar
+        progress: true,
+
+        // Push each slide change to the browser history
+        history: false,
+
+        // Enable keyboard shortcuts for navigation
+        keyboard: true,
+
+        // Enable the slide overview mode
+        overview: true,
+
+        // Vertical centering of slides
+        center: true,
+
+        // Loop the presentation
+        loop: false,
+
+        // Change the presentation direction to be RTL
+        rtl: false,
+
+        // Number of milliseconds between automatically proceeding to the
+        // next slide, disabled when set to 0, this value can be overwritten
+        // by using a data-autoslide attribute on your slides
+        autoSlide: 0,
+
+        // Enable slide navigation via mouse wheel
+        mouseWheel: false,
+
+        // Apply a 3D roll to links on hover
+        rollingLinks: true,
+
+        // Transition style
+        transition: 'none', // default/cube/page/concave/zoom/linear/fade/none
+
+        // Transition speed
+        transitionSpeed: 'default', // default/fast/slow
+
+        theme: Reveal.getQueryHash().theme, // available themes are in /css/theme
+        //transition: Reveal.getQueryHash().transition || 'default', // default/cube/page/concave/zoom/linear/fade/none
+
+        // Optional libraries used to extend on reveal.js
+        dependencies: [
+          { src: 'lib/js/classList.js', condition: function() { return !document.body.classList; } },
+          { src: 'plugin/markdown/marked.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+          { src: 'plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+          { src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } },
+          { src: 'plugin/zoom-js/zoom.js', async: true, condition: function() { return !!document.body.classList; } },
+          { src: 'plugin/notes/notes.js', async: true, condition: function() { return !!document.body.classList; } }
+          // { src: 'plugin/search/search.js', async: true, condition: function() { return !!document.body.classList; } }
+          // { src: 'plugin/remotes/remotes.js', async: true, condition: function() { return !!document.body.classList; } }
+        ]
+      });
+    </script>
+
+  </body>
+</html>
